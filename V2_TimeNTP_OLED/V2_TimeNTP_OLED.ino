@@ -11,9 +11,9 @@
 
 typedef unsigned long U;
 
-const U NTP_CHECK_INTERVAL = 1000; //10000; // s - 2h46m
-const U NTP_CHECK_AGAIN = 200; //10000; // s - 33m20s
-const U NTP_CHECK_JITTER = 100; // 1000; // s - 16m40s
+const U NTP_CHECK_INTERVAL = 10000; // 2h46m
+const U NTP_CHECK_AGAIN =     2000; // 33m20s
+const U NTP_CHECK_JITTER =    1000; // 16m40s
 
 // Initialize the display object with I2C address, SDA and SCL pins
 static SSD1306Wire display(0x3c,500000,SDA_OLED,SCL_OLED,GEOMETRY_128_64,RST_OLED);
@@ -208,7 +208,7 @@ void setup()
   display.screenRotate(ANGLE_0_DEGREE);
   display.setTextAlignment(TEXT_ALIGN_LEFT);
 
-  Serial.printf("WiFi: Connecting to '%s'\n",SSID);
+  Serial.printf("WiFi: Connecting to '%s'\n",SSID); // not shown for some reason...
   WiFi.begin(SSID,PASS);
   while( WiFi.status() != WL_CONNECTED ) { delay(500); Serial.print("."); } Serial.println("");
   Serial.print("IP number assigned by DHCP is "); Serial.println(WiFi.localIP());
@@ -216,21 +216,15 @@ void setup()
   udp.begin(LOCAL_UDP_PORT);
   Serial.println("Waiting for sync");
   U millis_ms;
-  for(;;)
+  for( millis_ms = get_and_show_date_time(); millis_ms==0; millis_ms = get_and_show_date_time() )
   {
-    millis_ms = get_and_show_date_time();
-    if(millis_ms!=0)
-      break;
     Serial.println("Waiting 30s");
     delay(30000);
   }
   delay(10000);
-  Serial.println("ONCE MORE");
-  for(;;)
+  Serial.println("ONCE MORE"); // do it again - now travel time should be much shorter
+  for( millis_ms = get_and_show_date_time(); millis_ms==0; millis_ms = get_and_show_date_time() )
   {
-    millis_ms = get_and_show_date_time(); // do it again - now travel time should be much shorter
-    if(millis_ms!=0)
-      break;
     Serial.println("Waiting 30s");
     delay(30000);
   }
@@ -294,22 +288,5 @@ void days_to_ymd( U days_since_1970, int& year, int& month, int& day )
   year += (month <= 2); // next year for Jan or Feb
 }
 
-/*
-TimeNTP Example
-Connecting to vsebudeua2
-....
-TimeNTP Example
-Connecting to vsebudeua2
-....
-IP number assigned by DHCP is 192.168.1.106
-Starting UDP
-Local port: waiting for sync
-Transmit NTP Request
-pool.ntp.org: 193.106.144.6 (or 178.165.67.75, 91.236.251.234, 91.231.182.17, 213.231.2.124, 31.133.97.13, ...)
-Receive NTP Response
-Seconds since 1900 3987701413
-Seconds since 1970 1778712613 (Unix time)
-2026/5/14 01:50:13 Thu
-*/
 // https://api.open-meteo.com/v1/forecast?latitude=50.47&longitude=30.52&current=temperature_2m,precipitation&hourly=temperature_2m,precipitation_probability
 
