@@ -16,6 +16,8 @@ const U NTP_CHECK_INTERVAL = 10000; // 2h46m
 const U NTP_CHECK_AGAIN =     2000; // 33m20s
 const U NTP_CHECK_JITTER =    1000; // 16m40s
 
+const U TIME_ZONE = +3; // Kyiv
+
 // Initialize the display object with I2C address, SDA and SCL pins
 static SSD1306Wire display(0x3c,500000,SDA_OLED,SCL_OLED,GEOMETRY_128_64,RST_OLED);
 
@@ -23,6 +25,7 @@ static SSD1306Wire display(0x3c,500000,SDA_OLED,SCL_OLED,GEOMETRY_128_64,RST_OLE
 
 HTTPClient http;
 char temperature[20] = "";
+char temperature_time[20] = "";
 
 void get_temperature()
 {
@@ -37,20 +40,25 @@ void get_temperature()
   }
   else
   {
-    temperature[0]='\0';
     String payload = http.getString();
     Serial.println(payload);
     int idx1 = payload.indexOf("\"current\":");
     if(idx1>0)
     {
-      float t;
+      float t; int r1,r2; int h, m;
       int idx2 = payload.indexOf("\"temperature_2m\":",idx1+10);
-      if( idx2>0 && sscanf(payload.c_str()+idx2+16,":%f",&t)==1 )
+      if( idx2>0 && (r1=sscanf(payload.c_str()+idx2+16,":%f",&t))==1 )
         sprintf(temperature,"%+0.1f°",t);
+      int idx3 = payload.indexOf("\"time\":",idx1+10);
+      if( idx3>0 && (r2=sscanf(payload.c_str()+idx3+6,":\"%*d-%*d-%*dT%d:%d\"",&h,&m))== 2 )
+        sprintf(temperature_time,"at  %02d:%02d",(h+TIME_ZONE)%24,m);
+      if( (idx2>0 && r1==1) && (idx3<=0 || r2!=2) ) strcat(temperature,"*"); // mark that only this component is actual
+      if( (idx2<=0 || r1!=1) && (idx3>0 && r2==2) ) strcat(temperature_time,"*");
     }
   }
   http.end();
-  Serial.print("< get_temperature "); Serial.print(temperature); Serial.print(" <<"); Serial.println(millis()-start);
+  Serial.print("< get_temperature "); Serial.print(temperature); Serial.print(" "); Serial.print(temperature_time);
+  Serial.print(" <<"); Serial.println(millis()-start);
 }
 
 /*-------- NTP/UDP stuff ----------*/
@@ -59,10 +67,8 @@ WiFiUDP udp;
 
 static const char NTP_SERVER_NAME[] = "pool.ntp.org"; // NTP Servers
 
-const char SSID[] = "wifinetwork";  // your wifi network SSID (name)
-const char PASS[] = "cleverpasword";  // your network password
-
-const U TIME_ZONE = +3; // Kyiv
+const char SSID[] = "wifi-network";  // your wifi network SSID (name)
+const char PASS[] = "clever-password";  // your network password
 
 U LOCAL_UDP_PORT = 8888; // local port to listen for UDP packets; another: 2390
 
@@ -178,9 +184,11 @@ void display_show_date_time( char* dt, char* wd, char* tm, char* ms )
   display.drawString(97,0,wd);
   display.setFont(ArialMT_Plain_24);
   display.drawString(0,19,tm);
-  display.setFont(ArialMT_Plain_16); // was 10
+  display.setFont(ArialMT_Plain_16);
   display.drawString(98,24,ms); // was 72,23
   display.drawString(0,48,temperature);
+  display.setFont(ArialMT_Plain_10);
+  display.drawString(56,52,temperature_time);
   display.display();
 }
 
