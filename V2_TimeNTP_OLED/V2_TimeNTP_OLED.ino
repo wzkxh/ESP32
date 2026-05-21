@@ -36,8 +36,7 @@ byte packet_buffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packet
 
 U get_4_byte_number( byte* buf, U pos )
 {
-  return (U)buf[pos] << 24 | (U)buf[pos+1] << 16 |
-         (U)buf[pos+2] << 8 | (U)buf[pos+3];
+  return (U)buf[pos] << 24 | (U)buf[pos+1] << 16 | (U)buf[pos+2] << 8 | (U)buf[pos+3];
 }
 
 void send_ntp_packet( IPAddress &address, byte* packet_buffer )
@@ -89,8 +88,8 @@ U get_ntp_time( U* ms=0 ) // return local seconds since 2026.1.1 0:00:00 and ms
         U receive_s = get_4_byte_number(packet_buffer,32); // Server Receive, s
         U receive_fraction = get_4_byte_number(packet_buffer,36); // and fraction
         Serial.printf("Rx %u ~%u --> Tx %u ~%u (%u)  Diff %u - %u µs\n", receive_s, receive_fraction,
-          seconds_since_1900, transmit_fraction, *ms,
-          transmit_fraction-receive_fraction, (U)(((uint64_t)(transmit_fraction-receive_fraction)*1000000)>>32));
+          seconds_since_1900, transmit_fraction, *ms, transmit_fraction-receive_fraction,
+          (U)(((uint64_t)(transmit_fraction-receive_fraction)*1000000)>>32));
       }
       digitalWrite(BOARD_LED_PIN,LOW);
       local_seconds_since_2026 = seconds_since_1900 - 3976214400UL + TIME_ZONE * 3600;
