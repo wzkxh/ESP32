@@ -6,6 +6,7 @@
 
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <HTTPClient.h>
 #include <HT_SSD1306Wire.h>
 #define BOARD_LED_PIN 25
 
@@ -17,6 +18,40 @@ const U NTP_CHECK_JITTER =    1000; // 16m40s
 
 // Initialize the display object with I2C address, SDA and SCL pins
 static SSD1306Wire display(0x3c,500000,SDA_OLED,SCL_OLED,GEOMETRY_128_64,RST_OLED);
+
+/*-------- HTTP stuff -------------*/
+
+HTTPClient http;
+char temperature[20] = "";
+
+void get_temperature()
+{
+  U start = millis();
+  Serial.println("> get_temperature");
+  http.begin("https://api.open-meteo.com/v1/forecast?latitude=50.5&longitude=30.375&current=temperature_2m");
+  int httpCode = http.GET();
+  if(httpCode!=200)
+  {
+    Serial.printf("HTTP error: %d\n",httpCode);
+    sprintf(temperature,"[error:%d]",httpCode);
+  }
+  else
+  {
+    temperature[0]='\0';
+    String payload = http.getString();
+    Serial.println(payload);
+    int idx1 = payload.indexOf("\"current\":");
+    if(idx1>0)
+    {
+      float t;
+      int idx2 = payload.indexOf("\"temperature_2m\":",idx1+10);
+      if( idx2>0 && sscanf(payload.c_str()+idx2+16,":%f",&t)==1 )
+        sprintf(temperature,"%+0.1f°",t);
+    }
+  }
+  http.end();
+  Serial.print("< get_temperature "); Serial.print(temperature); Serial.print(" <<"); Serial.println(millis()-start);
+}
 
 /*-------- NTP/UDP stuff ----------*/
 
@@ -116,7 +151,7 @@ void format_date( U days_since_2026, char* dt )
 {
   int y,m,d;
   days_to_ymd( days_since_2026+20454, y, m, d ); // to days since 1970
-  sprintf( dt, "%d-%d-%d", y, m, d );
+  sprintf( dt, "%d.%d.%d", y, m, d );
 }
 
 void Serial_show_date_time( U time_s, U time_ms, char* dt, char* tm, char* wd, bool prt )
@@ -145,6 +180,7 @@ void display_show_date_time( char* dt, char* wd, char* tm, char* ms )
   display.drawString(0,19,tm);
   display.setFont(ArialMT_Plain_16); // was 10
   display.drawString(98,24,ms); // was 72,23
+  display.drawString(0,48,temperature);
   display.display();
 }
 
@@ -212,6 +248,7 @@ void setup()
   WiFi.begin(SSID,PASS);
   while( WiFi.status() != WL_CONNECTED ) { delay(500); Serial.print("."); } Serial.println("");
   Serial.print("IP number assigned by DHCP is "); Serial.println(WiFi.localIP());
+  get_temperature();
   Serial.println("Starting UDP");
   udp.begin(LOCAL_UDP_PORT);
   Serial.println("Waiting for sync");
@@ -259,6 +296,7 @@ void loop()
       Serial.print("[7] next_millis "); Serial.println(next_millis);
       Serial.print("[8] ntp_next_millis "); Serial.println(ntp_next_millis);
     }
+    get_temperature();
   }
   else if( m >= next_millis )
   {
@@ -288,5 +326,9 @@ void days_to_ymd( U days_since_1970, int& year, int& month, int& day )
   year += (month <= 2); // next year for Jan or Feb
 }
 
-// https://api.open-meteo.com/v1/forecast?latitude=50.47&longitude=30.52&current=temperature_2m,precipitation&hourly=temperature_2m,precipitation_probability
+// https://api.open-meteo.com/v1/forecast?latitude=50.5&longitude=30.375&current=temperature_2m,precipitation&hourly=temperature_2m,precipitation_probability&timezone=Europe/Kyiv
+// https://api.open-meteo.com/v1/forecast?latitude=50.5&longitude=30.375&current=temperature_2m&timezone=Europe/Kyiv
+// {"latitude":50.5,"longitude":30.375,"generationtime_ms":0.05555152893066406,"utc_offset_seconds":10800,"timezone":"Europe/Kiev",
+// "timezone_abbreviation":"GMT+3","elevation":164.0,"current_units":{"time":"iso8601","interval":"seconds","temperature_2m":"°C"},
+// "current":{"time":"2026-05-21T20:30","interval":900,"temperature_2m":24.8}}
 
