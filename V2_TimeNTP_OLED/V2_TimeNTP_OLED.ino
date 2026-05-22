@@ -7,6 +7,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <HT_SSD1306Wire.h>
 #define BOARD_LED_PIN 25
 
@@ -15,6 +16,7 @@ typedef unsigned long U;
 const U NTP_CHECK_INTERVAL = 10000; // 2h46m
 const U NTP_CHECK_AGAIN =     2000; // 33m20s
 const U NTP_CHECK_JITTER =    1000; // 16m40s
+const U WEATHER_POLL =          15; // 15m
 
 const U TIME_ZONE = +3; // Kyiv
 
@@ -23,37 +25,51 @@ static SSD1306Wire display(0x3c,500000,SDA_OLED,SCL_OLED,GEOMETRY_128_64,RST_OLE
 
 /*-------- HTTP stuff -------------*/
 
-HTTPClient http;
+static WiFiClientSecure wificlient;
 char temperature[20] = "";
 char temperature_time[20] = "";
+static U next_weather_poll = 0;
+static char last_time_string[20] = ""; // just hh:mm:ss to show in the log
+static U last_time_minutes = 0; // minutes of the last time retrieved; then we'll poll temperature at 1,16,31,46 minutes
 
 void get_temperature()
 {
   U start = millis();
-  Serial.println("> get_temperature");
-  http.begin("https://api.open-meteo.com/v1/forecast?latitude=50.5&longitude=30.375&current=temperature_2m");
+  Serial.print("> get_temperature "); Serial.println(last_time_string);
+  HTTPClient http;
+  if( !http.begin("https://api.open-meteo.com/v1/forecast?latitude=50.5&longitude=30.375&current=temperature_2m") )
+  {
+    Serial.printf("http.begin failed");
+    return;
+  }
+  http.setUserAgent("ESP32-Client");
+  digitalWrite(BOARD_LED_PIN,HIGH);
   int httpCode = http.GET();
-  if(httpCode!=200)
+  digitalWrite(BOARD_LED_PIN,LOW);
+  if(httpCode!=HTTP_CODE_OK)
   {
     Serial.printf("HTTP error: %d\n",httpCode);
-    sprintf(temperature,"[error:%d]",httpCode);
+    if( temperature_time[0]=='\0' )
+      strcpy(temperature_time,"*");
+    else if( temperature_time[strlen(temperature_time)-1]!='*' )
+      strcat(temperature_time,"*");
   }
   else
   {
     String payload = http.getString();
-    Serial.println(payload);
-    int idx1 = payload.indexOf("\"current\":");
-    if(idx1>0)
+    //Serial.println(payload);
+    int idx0 = payload.indexOf("\"current\":");
+    if(idx0>0)
     {
       float t; int r1,r2; int h, m;
-      int idx2 = payload.indexOf("\"temperature_2m\":",idx1+10);
-      if( idx2>0 && (r1=sscanf(payload.c_str()+idx2+16,":%f",&t))==1 )
+      int idx1 = payload.indexOf("\"temperature_2m\":",idx0+10);
+      if( idx1>0 && (r1=sscanf(payload.c_str()+idx1+16,":%f",&t))==1 )
         sprintf(temperature,"%+0.1f°",t);
-      int idx3 = payload.indexOf("\"time\":",idx1+10);
-      if( idx3>0 && (r2=sscanf(payload.c_str()+idx3+6,":\"%*d-%*d-%*dT%d:%d\"",&h,&m))== 2 )
+      int idx2 = payload.indexOf("\"time\":",idx0+10);
+      if( idx2>0 && (r2=sscanf(payload.c_str()+idx2+6,":\"%*d-%*d-%*dT%d:%d\"",&h,&m))== 2 )
         sprintf(temperature_time,"at  %02d:%02d",(h+TIME_ZONE)%24,m);
-      if( (idx2>0 && r1==1) && (idx3<=0 || r2!=2) ) strcat(temperature,"*"); // mark that only this component is actual
-      if( (idx2<=0 || r1!=1) && (idx3>0 && r2==2) ) strcat(temperature_time,"*");
+      if( (idx1>0 && r1==1) && (idx2<=0 || r2!=2) ) strcat(temperature,"!"); // mark that only this component is actual
+      if( (idx1<=0 || r1!=1) && (idx2>0 && r2==2) ) strcat(temperature_time,"!");
     }
   }
   http.end();
@@ -128,7 +144,7 @@ U get_ntp_time( U* ms=0 ) // return local seconds since 2026.1.1 0:00:00 and ms
         *ms = (U)(((uint64_t)transmit_fraction * 1000) >> 32); // Convert to milliseconds
         U receive_s = get_4_byte_number(packet_buffer,32); // Server Receive, s
         U receive_fraction = get_4_byte_number(packet_buffer,36); // and fraction
-        Serial.printf("Rx %u ~%u --> Tx %u ~%u (%u)  Diff %u - %u µs\n", receive_s, receive_fraction,
+        Serial.printf("Rx %u /%u --> Tx %u /%u (%ums) Diff %u - %u µs\n", receive_s, receive_fraction,
           seconds_since_1900, transmit_fraction, *ms, transmit_fraction-receive_fraction,
           (U)(((uint64_t)(transmit_fraction-receive_fraction)*1000000)>>32));
       }
@@ -145,174 +161,6 @@ U get_ntp_time( U* ms=0 ) // return local seconds since 2026.1.1 0:00:00 and ms
 }
 
 // -----------------------
-
-void format_time( U t, char* tm ) // t - seconds since midnight, 0 to <86400
-{
-  sprintf( tm, "%02d:%02d:%02d", t/3600, t/60%60, t%60 );
-}
-
-void days_to_ymd( U days_since_1970, int& year, int& month, int& day );
-
-void format_date( U days_since_2026, char* dt )
-{
-  int y,m,d;
-  days_to_ymd( days_since_2026+20454, y, m, d ); // to days since 1970
-  sprintf( dt, "%d.%d.%d", y, m, d );
-}
-
-void Serial_show_date_time( U time_s, U time_ms, char* dt, char* tm, char* wd, bool prt )
-{
-  if(time_s==0) return;
-  U seconds = time_s % (24*3600);
-  U days = time_s / (24*3600);
-  format_time( seconds, tm );
-  format_date( days, dt );
-  static const char* WEEKDAYS[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
-  strcpy( wd, WEEKDAYS[(days + 4) % 7] );
-  if(!prt) return;
-  Serial.print(dt); Serial.print(" "); Serial.print(tm); Serial.print(".");
-  if(time_ms<100) Serial.print("0"); if(time_ms<10) Serial.print("0"); Serial.print(time_ms);
-  Serial.print(" "); Serial.println(wd);
-}
-
-void display_show_date_time( char* dt, char* wd, char* tm, char* ms )
-{
-  display.clear();
-  // display.setColor(BLACK); display.fillRect(0,19,70,17); display.setColor(WHITE);
-  display.setFont(ArialMT_Plain_16);
-  display.drawString(0,0,dt);
-  display.drawString(97,0,wd);
-  display.setFont(ArialMT_Plain_24);
-  display.drawString(0,19,tm);
-  display.setFont(ArialMT_Plain_16);
-  display.drawString(98,24,ms); // was 72,23
-  display.drawString(0,48,temperature);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(56,52,temperature_time);
-  display.display();
-}
-
-// Timing configuration variables
-// _sms - s+ms, _s, _ms - s and ms parts, _d - days, _ds - seconds inside day
-static uint64_t last_ntp_time_sms = 0; // true time
-static uint64_t delta_sms = 0;
-static U ntp_next_millis = 0; // to read NTP next time
-U next_millis = 0; // to show time nex time
-
-U get_and_show_date_time()
-{
-  U ms_before = millis();
-  U ntp_ms;
-  U ntp_s = get_ntp_time( &ntp_ms ); // seconds since 1970.1.1 0:00:00 local time
-  U ms_after = millis();
-  Serial.print("get_ntp_time took (ms) "); Serial.println(ms_after-ms_before);
-  if(ntp_s==0)
-  {
-    Serial.println("Couldn't get NTP time");
-    return 0;
-  }
-  U one_way_trip_ms = (ms_after - ms_before + 1) / 2; // 1 - typical NTP delta between receive and transmit
-  last_ntp_time_sms = (uint64_t)ntp_s*1000 + ntp_ms + one_way_trip_ms; // corresponding to moment ms_after
-  delta_sms = last_ntp_time_sms - ms_after;
-  U real_s = (U)(last_ntp_time_sms / 1000);
-  U real_ms = (U)(last_ntp_time_sms % 1000);
-
-  Serial.print("NTP time returned: "); Serial.print(ntp_s); Serial.print(".");
-  if(ntp_ms<100) Serial.print("0"); if(ntp_ms<10) Serial.print("0"); Serial.println(ntp_ms);
-  Serial.print("One way trip: "); Serial.println(one_way_trip_ms);
-  Serial.print("NTP true time ms: "); Serial.print(last_ntp_time_sms);
-  Serial.print("  DELTA "); Serial.println(delta_sms);
-
-  char dt[20], tm[20], wd[20], ms[20];
-  Serial_show_date_time(real_s,real_ms,dt,tm,wd,true);
-  sprintf(ms,"%03d",real_ms);
-  display_show_date_time(dt,wd,tm,ms);
-  return ms_after;
-}
-
-void just_show_time( U millis_sms )
-{
-  uint64_t ntp_time_sms = millis_sms + delta_sms;
-  U real_s = (U)(ntp_time_sms / 1000);
-  U real_ms = (U)(ntp_time_sms % 1000);
-  char dt[20], tm[20], wd[20], ms[20];
-  Serial_show_date_time(real_s,real_ms,dt,tm,wd,false);
-  sprintf(ms,"%03d",real_ms);
-  display_show_date_time(dt,wd,tm,ms);
-}
-
-void setup()
-{
-  Serial.begin(115200);
-  delay(200);
-  pinMode(BOARD_LED_PIN, OUTPUT);
-
-  // Initialize and configure Heltec native display
-  display.init();
-  display.screenRotate(ANGLE_0_DEGREE);
-  display.setTextAlignment(TEXT_ALIGN_LEFT);
-
-  Serial.printf("WiFi: Connecting to '%s'\n",SSID); // not shown for some reason...
-  WiFi.begin(SSID,PASS);
-  while( WiFi.status() != WL_CONNECTED ) { delay(500); Serial.print("."); } Serial.println("");
-  Serial.print("IP number assigned by DHCP is "); Serial.println(WiFi.localIP());
-  get_temperature();
-  Serial.println("Starting UDP");
-  udp.begin(LOCAL_UDP_PORT);
-  Serial.println("Waiting for sync");
-  U millis_ms;
-  for( millis_ms = get_and_show_date_time(); millis_ms==0; millis_ms = get_and_show_date_time() )
-  {
-    Serial.println("Waiting 30s");
-    delay(30000);
-  }
-  delay(10000);
-  Serial.println("ONCE MORE"); // do it again - now travel time should be much shorter
-  for( millis_ms = get_and_show_date_time(); millis_ms==0; millis_ms = get_and_show_date_time() )
-  {
-    Serial.println("Waiting 30s");
-    delay(30000);
-  }
-  U fraction_ms = (U)( last_ntp_time_sms % 1000 );
-  Serial.print("[1] millis_ms "); Serial.print(millis_ms); Serial.print(" fr_ms "); Serial.println(fraction_ms);
-  next_millis = millis_ms + (1000-fraction_ms) + 1000; // Shift to the whole second bound
-  ntp_next_millis = next_millis + NTP_CHECK_INTERVAL*1000;
-  Serial.print("[2] next_millis "); Serial.println(next_millis);
-  Serial.print("[3] ntp_next_millis "); Serial.println(ntp_next_millis);
-}
-
-void loop()
-{
-  U m = millis();
-  if( m >= ntp_next_millis )
-  {
-    U millis_ms = get_and_show_date_time();
-    if(millis_ms==0)
-    {
-      ntp_next_millis += NTP_CHECK_AGAIN*1000;
-      Serial.print("[9] ntp_next_millis "); Serial.println(ntp_next_millis);
-    }
-    else
-    {
-      U fraction_ms = (U)( last_ntp_time_sms % 1000 );
-      Serial.print("[5] millis_ms "); Serial.print(millis_ms); Serial.print(" fr_ms "); Serial.println(fraction_ms);
-      U jitter = esp_random() % NTP_CHECK_JITTER; // 0–16 min jitter in ms
-      Serial.print("[6] jitter "); Serial.println(jitter);
-      next_millis = millis_ms + (1000-fraction_ms); // Shift to the whole second bound
-      if(fraction_ms>=500) next_millis += 1000;
-      ntp_next_millis = next_millis + (NTP_CHECK_INTERVAL + jitter)*1000; // ≈ 10,000,000 ms (2h46m) ± 1,000,000 (16m40s)
-      Serial.print("[7] next_millis "); Serial.println(next_millis);
-      Serial.print("[8] ntp_next_millis "); Serial.println(ntp_next_millis);
-    }
-    get_temperature();
-  }
-  else if( m >= next_millis )
-  {
-    just_show_time(m);
-    next_millis += 1000;
-  }
-  delay(20);
-}
 
 void days_to_ymd( U days_since_1970, int& year, int& month, int& day )
 {
@@ -334,9 +182,170 @@ void days_to_ymd( U days_since_1970, int& year, int& month, int& day )
   year += (month <= 2); // next year for Jan or Feb
 }
 
-// https://api.open-meteo.com/v1/forecast?latitude=50.5&longitude=30.375&current=temperature_2m,precipitation&hourly=temperature_2m,precipitation_probability&timezone=Europe/Kyiv
-// https://api.open-meteo.com/v1/forecast?latitude=50.5&longitude=30.375&current=temperature_2m&timezone=Europe/Kyiv
-// {"latitude":50.5,"longitude":30.375,"generationtime_ms":0.05555152893066406,"utc_offset_seconds":10800,"timezone":"Europe/Kiev",
-// "timezone_abbreviation":"GMT+3","elevation":164.0,"current_units":{"time":"iso8601","interval":"seconds","temperature_2m":"°C"},
-// "current":{"time":"2026-05-21T20:30","interval":900,"temperature_2m":24.8}}
+void format_date( U days_since_2026, char* dt )
+{
+  int y,m,d;
+  days_to_ymd( days_since_2026+20454, y, m, d ); // to days since 1970
+  sprintf( dt, "%d.%d.%d", y, m, d ); // return
+}
 
+void format_time( U t, char* tm ) // t - seconds since midnight, 0 to <86400
+{
+  last_time_minutes = t/60%60; // save minutes for weather poll schedule
+  sprintf( tm, "%02u:%02u:%02u", t/3600, last_time_minutes, t%60 );
+  strcpy( last_time_string, tm ); // leave it there for other routines (currently - for log)
+}
+
+void split_ntp_time( uint64_t ntp_time_ms, char* dt, char* tm, char* ms, char* wd )
+{
+  U time_s = (U)(ntp_time_ms / 1000);
+  U time_ms = (U)(ntp_time_ms % 1000);
+  if(time_s==0) return;
+  U seconds = time_s % (24*3600);
+  U days = time_s / (24*3600);
+  sprintf( ms, "%03u", time_ms );
+  format_time( seconds, tm );
+  format_date( days, dt );
+  static const char* WEEKDAYS[] = {"Sun","Mon","Tue","Wed","Thu","Fri","Sat"};
+  strcpy( wd, WEEKDAYS[(days + 4) % 7] );
+}
+
+void display_show_date_time( char* dt, char* wd, char* tm, char* ms )
+{
+  display.clear();
+  // display.setColor(BLACK); display.fillRect(0,19,70,17); display.setColor(WHITE);
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(0,0,dt);
+  display.drawString(97,0,wd);
+  display.setFont(ArialMT_Plain_24);
+  display.drawString(0,19,tm);
+  display.setFont(ArialMT_Plain_16);
+  display.drawString(98,24,ms); // was 72,23
+  display.drawString(0,48,temperature);
+  display.setFont(ArialMT_Plain_10);
+  display.drawString(56,52,temperature_time);
+  display.display();
+}
+
+// Timing configuration variables
+static uint64_t last_ntp_time_ms = 0; // true time, ms
+static uint64_t delta_ms = 0; // difference between millis() and last_ntp_time_ms
+static U ntp_next_millis = 0; // to read NTP next time
+static U next_millis = 0; // to show time nex time
+
+U get_and_show_date_time()
+{
+  U ms_before = millis();
+  U ntp_ms;
+  U ntp_s = get_ntp_time( &ntp_ms ); // seconds since 1970.1.1 0:00:00 local time
+  U ms_after = millis();
+  Serial.print("get_ntp_time took (ms) "); Serial.println(ms_after-ms_before);
+  if(ntp_s==0)
+  {
+    Serial.println("Couldn't get NTP time");
+    return 0;
+  }
+  U one_way_trip_ms = (ms_after - ms_before + 1) / 2; // 1 - typical NTP delta_ms between receive and transmit
+  last_ntp_time_ms = (uint64_t)ntp_s*1000 + ntp_ms + one_way_trip_ms; // corresponding to moment ms_after
+  delta_ms = last_ntp_time_ms - ms_after;
+
+  Serial.print("NTP time returned: "); Serial.print(ntp_s); Serial.print(".");
+  if(ntp_ms<100) Serial.print("0"); if(ntp_ms<10) Serial.print("0"); Serial.println(ntp_ms);
+  Serial.print("One way trip: "); Serial.println(one_way_trip_ms);
+  Serial.print("NTP true time ms: "); Serial.print(last_ntp_time_ms);
+  Serial.print(" DELTA "); Serial.println(delta_ms);
+
+  char dt[20], tm[20], ms[20], wd[20];
+  split_ntp_time(last_ntp_time_ms,dt,tm,ms,wd);
+  display_show_date_time(dt,wd,tm,ms);
+  Serial.printf( "%s %s.%s %s", dt, tm, ms, wd );
+  return ms_after;
+}
+
+void just_show_time( U millis_ms )
+{
+  char dt[20], tm[20], ms[20], wd[20];
+  split_ntp_time(millis_ms + delta_ms,dt,tm,ms,wd);
+  display_show_date_time(dt,wd,tm,ms);
+}
+
+void get_and_show_temperature()
+{
+  get_temperature();
+  U minutes_to_quarter_start = WEATHER_POLL-((last_time_minutes+WEATHER_POLL-1)%WEATHER_POLL); // to 1st minute after quarter
+  Serial.print("last_time_minutes "); Serial.print(last_time_minutes);
+  Serial.print(" minutes_to_quarter_start "); Serial.println(minutes_to_quarter_start);
+  next_weather_poll = millis() + minutes_to_quarter_start*60000;
+  Serial.print("Next weather poll "); Serial.println(next_weather_poll);
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(200);
+  pinMode(BOARD_LED_PIN, OUTPUT);
+
+  // Initialize and configure Heltec native display
+  display.init();
+  display.screenRotate(ANGLE_0_DEGREE);
+  display.setTextAlignment(TEXT_ALIGN_LEFT);
+
+  Serial.printf("WiFi: Connecting to '%s'\n",SSID); // not shown for some reason...
+  WiFi.begin(SSID,PASS);
+  while( WiFi.status() != WL_CONNECTED ) { delay(500); Serial.print("."); } Serial.println("");
+  Serial.print("IP number assigned by DHCP is "); Serial.println(WiFi.localIP());
+
+  wificlient.setInsecure();
+  wificlient.setTimeout(5000); // timeout 5 seconds
+
+  Serial.println("Starting UDP");
+  udp.begin(LOCAL_UDP_PORT);
+  Serial.println("Waiting for sync");
+  U millis_ms = get_and_show_date_time();
+  while( millis_ms==0 ) // Don't start until we get time from NTP
+  {
+    Serial.println("Waiting 30s...");
+    delay(30000);
+    millis_ms = get_and_show_date_time();
+  }
+  U fraction_ms = (U)( last_ntp_time_ms % 1000 );
+  Serial.print("[1] millis_ms "); Serial.print(millis_ms); Serial.print(" fraction_ms "); Serial.println(fraction_ms);
+  next_millis = millis_ms + (1000-fraction_ms) + 1000; // Shift to the whole second bound
+  ntp_next_millis = next_millis + NTP_CHECK_INTERVAL*1000;
+  Serial.print("[2] ntp_next_millis "); Serial.println(ntp_next_millis);
+
+  get_and_show_temperature();
+}
+
+void loop()
+{
+  U m = millis();
+  if( m >= next_weather_poll )
+    get_and_show_temperature();
+  if( m >= ntp_next_millis )
+  {
+    U millis_ms = get_and_show_date_time();
+    if(millis_ms==0)
+    {
+      ntp_next_millis += NTP_CHECK_AGAIN*1000;
+      Serial.print("[9] ntp_next_millis "); Serial.println(ntp_next_millis);
+    }
+    else
+    {
+      U fraction_ms = (U)( last_ntp_time_ms % 1000 );
+      Serial.print("[5] millis_ms "); Serial.print(millis_ms); Serial.print(" fr_ms "); Serial.println(fraction_ms);
+      U jitter = esp_random() % NTP_CHECK_JITTER; // 0–16 min jitter in ms
+      Serial.print("[6] jitter "); Serial.println(jitter);
+      next_millis = millis_ms + (1000-fraction_ms); // Shift to the whole second bound
+      if(fraction_ms>=500) next_millis += 1000;
+      ntp_next_millis = next_millis + (NTP_CHECK_INTERVAL + jitter)*1000; // ≈ 10,000,000 ms (2h46m) ± 1,000,000 (16m40s)
+      Serial.print("[7] ntp_next_millis "); Serial.println(ntp_next_millis);
+    }
+  }
+  else if( m >= next_millis )
+  {
+    just_show_time(m);
+    next_millis += 1000;
+  }
+  delay(20);
+}
