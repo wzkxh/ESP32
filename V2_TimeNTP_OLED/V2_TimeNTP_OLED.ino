@@ -11,17 +11,22 @@
 #include <HT_SSD1306Wire.h>
 #define BOARD_LED_PIN 25
 
+#define Serial_begin(x) Serial.begin(x)
+#define Serial_print(x) Serial.print(x)
+#define Serial_println(x) Serial.printf(x)
+#define Serial_printf(...) Serial.printf(__VA_ARGS__)
+// or (void)0
+
 typedef unsigned long U;
 
-const U NTP_CHECK_INTERVAL = 10000; // 2h46m
-const U NTP_CHECK_AGAIN =     2000; // 33m20s
-const U NTP_CHECK_JITTER =    1000; // 16m40s
-const U WEATHER_POLL =          15; // 15m
-
+const U NTP_CHECK_INTERVAL = 150*60; // 2h30m
+const U NTP_CHECK_REPEAT = 30*60; // 30m
+const U NTP_CHECK_JITTER = 15*60; // 0..15m
+const U WEATHER_POLL = 15; // 15m
 const U TIME_ZONE = +3; // Kyiv
 
 // Initialize the display object with I2C address, SDA and SCL pins
-static SSD1306Wire display(0x3c,500000,SDA_OLED,SCL_OLED,GEOMETRY_128_64,RST_OLED);
+static SSD1306Wire oled(0x3c,500000,SDA_OLED,SCL_OLED,GEOMETRY_128_64,RST_OLED);
 
 /*-------- HTTP stuff -------------*/
 
@@ -29,17 +34,17 @@ static WiFiClientSecure wificlient;
 char temperature[20] = "";
 char temperature_time[20] = "";
 static U next_weather_poll = 0;
-static char last_time_string[20] = ""; // just hh:mm:ss to show in the log
 static U last_time_minutes = 0; // minutes of the last time retrieved; then we'll poll temperature at 1,16,31,46 minutes
+static char last_time_string[20] = ""; // just hh:mm:ss to show in the log
 
 void get_temperature()
 {
-  U start = millis();
+  U start = millis(); // for logging only
   Serial.print("> get_temperature "); Serial.println(last_time_string);
   HTTPClient http;
   if( !http.begin("https://api.open-meteo.com/v1/forecast?latitude=50.5&longitude=30.375&current=temperature_2m") )
   {
-    Serial.printf("http.begin failed");
+    Serial.println("http.begin failed");
     return;
   }
   http.setUserAgent("ESP32-Client");
@@ -73,8 +78,17 @@ void get_temperature()
     }
   }
   http.end();
-  Serial.print("< get_temperature "); Serial.print(temperature); Serial.print(" "); Serial.print(temperature_time);
-  Serial.print(" <<"); Serial.println(millis()-start);
+  Serial.printf("< get_temperature %s %s <<%ums\n",temperature,temperature_time,millis()-start);
+}
+
+void get_and_show_temperature()
+{
+  get_temperature();
+  U minutes_to_quarter_start = WEATHER_POLL-((last_time_minutes+WEATHER_POLL-1)%WEATHER_POLL); // quarter + 1 minute
+  Serial.print("last_time_minutes "); Serial.print(last_time_minutes);
+  Serial.print(" minutes_to_quarter_start "); Serial.println(minutes_to_quarter_start);
+  next_weather_poll = millis() + minutes_to_quarter_start*60000;
+  Serial.print("Next weather poll "); Serial.println(next_weather_poll);
 }
 
 /*-------- NTP/UDP stuff ----------*/
@@ -165,18 +179,14 @@ U get_ntp_time( U* ms=0 ) // return local seconds since 2026.1.1 0:00:00 and ms
 void days_to_ymd( U days_since_1970, int& year, int& month, int& day )
 {
   // Shift epoch to 1968-03-01 (the closest March 1st leap-cycle start)
-  // 671 days between 1968-03-01 and 1970-01-01
-  U t = days_since_1970 + 671;
-  // 1461 days = 3 years of 365 days + 1 leap year of 366 days
-  U cycle4 = t / 1461;
+  U t = days_since_1970 + 671; // 671 days between 1968-03-01 and 1970-01-01
+  U cycle4 = t / 1461; // 1461 days = 3 years of 365 days + 1 leap year of 366 days
   U doc4 = t % 1461; // Day of 4-year cycle
-  // Estimate year within the 4-year cycle
-  U yoc = (doc4 - doc4 / 1460) / 365;
-  year = 1968 + cycle4 * 4 + yoc; // Change 1968 to 2024 for since_2026
-  // Day of year (March 1st is day 0)
-  U doy = doc4 - (365 * yoc + yoc / 4);
+  U yoc = (doc4 - doc4 / 1460) / 365; // Estimate year within the 4-year cycle
+  year = 1968 + cycle4 * 4 + yoc; // *Change 1968 to 2024 for since_2026
+  U doy = doc4 - (365 * yoc + yoc / 4); // Day of year (March 1st is day 0)
   // Magic formula for month and day (March = 0, April = 1, etc.)
-  U mp = (5 * doy + 2) / 153;
+  U mp = (5 * doy + 2) / 153; // ... because average month is 30.6 days
   day = doy - (153 * mp + 2) / 5 + 1;
   month = mp < 10 ? mp + 3 : mp - 9;
   year += (month <= 2); // next year for Jan or Feb
@@ -210,21 +220,21 @@ void split_ntp_time( uint64_t ntp_time_ms, char* dt, char* tm, char* ms, char* w
   strcpy( wd, WEEKDAYS[(days + 4) % 7] );
 }
 
-void display_show_date_time( char* dt, char* wd, char* tm, char* ms )
+void display_date_time( char* dt, char* wd, char* tm, char* ms )
 {
-  display.clear();
-  // display.setColor(BLACK); display.fillRect(0,19,70,17); display.setColor(WHITE);
-  display.setFont(ArialMT_Plain_16);
-  display.drawString(0,0,dt);
-  display.drawString(97,0,wd);
-  display.setFont(ArialMT_Plain_24);
-  display.drawString(0,19,tm);
-  display.setFont(ArialMT_Plain_16);
-  display.drawString(98,24,ms); // was 72,23
-  display.drawString(0,48,temperature);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(56,52,temperature_time);
-  display.display();
+  oled.clear();
+  // oled.setColor(BLACK); oled.fillRect(0,19,70,17); oled.setColor(WHITE);
+  oled.setFont(ArialMT_Plain_16);
+  oled.drawString(0,0,dt);
+  oled.drawString(97,0,wd);
+  oled.setFont(ArialMT_Plain_24);
+  oled.drawString(0,19,tm);
+  oled.setFont(ArialMT_Plain_16);
+  oled.drawString(98,24,ms); // was 72,23
+  oled.drawString(0,48,temperature);
+  oled.setFont(ArialMT_Plain_10);
+  oled.drawString(56,52,temperature_time);
+  oled.display();
 }
 
 // Timing configuration variables
@@ -257,8 +267,8 @@ U get_and_show_date_time()
 
   char dt[20], tm[20], ms[20], wd[20];
   split_ntp_time(last_ntp_time_ms,dt,tm,ms,wd);
-  display_show_date_time(dt,wd,tm,ms);
-  Serial.printf( "%s %s.%s %s", dt, tm, ms, wd );
+  display_date_time(dt,wd,tm,ms);
+  Serial.printf( "%s %s.%s %s\n", dt, tm, ms, wd );
   return ms_after;
 }
 
@@ -266,17 +276,7 @@ void just_show_time( U millis_ms )
 {
   char dt[20], tm[20], ms[20], wd[20];
   split_ntp_time(millis_ms + delta_ms,dt,tm,ms,wd);
-  display_show_date_time(dt,wd,tm,ms);
-}
-
-void get_and_show_temperature()
-{
-  get_temperature();
-  U minutes_to_quarter_start = WEATHER_POLL-((last_time_minutes+WEATHER_POLL-1)%WEATHER_POLL); // to 1st minute after quarter
-  Serial.print("last_time_minutes "); Serial.print(last_time_minutes);
-  Serial.print(" minutes_to_quarter_start "); Serial.println(minutes_to_quarter_start);
-  next_weather_poll = millis() + minutes_to_quarter_start*60000;
-  Serial.print("Next weather poll "); Serial.println(next_weather_poll);
+  display_date_time(dt,wd,tm,ms);
 }
 
 void setup()
@@ -286,9 +286,9 @@ void setup()
   pinMode(BOARD_LED_PIN, OUTPUT);
 
   // Initialize and configure Heltec native display
-  display.init();
-  display.screenRotate(ANGLE_0_DEGREE);
-  display.setTextAlignment(TEXT_ALIGN_LEFT);
+  oled.init();
+  oled.screenRotate(ANGLE_0_DEGREE);
+  oled.setTextAlignment(TEXT_ALIGN_LEFT);
 
   Serial.printf("WiFi: Connecting to '%s'\n",SSID); // not shown for some reason...
   WiFi.begin(SSID,PASS);
@@ -327,13 +327,13 @@ void loop()
     U millis_ms = get_and_show_date_time();
     if(millis_ms==0)
     {
-      ntp_next_millis += NTP_CHECK_AGAIN*1000;
+      ntp_next_millis += NTP_CHECK_REPEAT*1000;
       Serial.print("[9] ntp_next_millis "); Serial.println(ntp_next_millis);
     }
     else
     {
       U fraction_ms = (U)( last_ntp_time_ms % 1000 );
-      Serial.print("[5] millis_ms "); Serial.print(millis_ms); Serial.print(" fr_ms "); Serial.println(fraction_ms);
+      Serial.print("[5] millis_ms "); Serial.print(millis_ms); Serial.print(" fraction_ms "); Serial.println(fraction_ms);
       U jitter = esp_random() % NTP_CHECK_JITTER; // 0–16 min jitter in ms
       Serial.print("[6] jitter "); Serial.println(jitter);
       next_millis = millis_ms + (1000-fraction_ms); // Shift to the whole second bound
