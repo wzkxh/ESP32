@@ -2,6 +2,7 @@
 // Sync time with NTP time source, get weather (temperature) from open-meteo, show it on OLED display
 // Heltec WiFi LoRa V2 - ESP32-D0WDQ6 (revision 1)
 
+#include <math.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <HTTPClient.h>
@@ -26,6 +27,7 @@ static WiFiClientSecure wificlient;
 char temperature[20] = "";
 char temperature_time[20] = "";
 static U next_weather_poll = 0;
+static U last_time_hours = 0;
 static U last_time_minutes = 0; // minutes of the last time retrieved; then we'll poll temperature at 1,16,31,46 minutes
 static char last_time_string[20] = ""; // just hh:mm:ss to show in the log
 
@@ -37,9 +39,9 @@ void get_temperature()
     return;
   http.setUserAgent("ESP32-Client");
   digitalWrite(BOARD_LED_PIN,HIGH);
-  int httpCode = http.GET();
+  int http_code = http.GET();          // TODO: make it asynch, in another thread
   digitalWrite(BOARD_LED_PIN,LOW);
-  if(httpCode!=HTTP_CODE_OK)
+  if(http_code!=HTTP_CODE_OK)
   {
     if( temperature_time[0]=='\0' )
       strcpy(temperature_time,"*");
@@ -80,8 +82,8 @@ WiFiUDP udp;
 
 static const char NTP_SERVER_NAME[] = "pool.ntp.org"; // NTP Servers
 
-const char SSID[] = "wifi-network";  // your wifi network SSID (name)
-const char PASS[] = "clever-password";  // your network password
+const char SSID[] = "wifi-network";    // your wifi network SSID (name)
+const char PASS[] = "clever-password"; // your network password
 
 U LOCAL_UDP_PORT = 8888; // local port to listen for UDP packets; another: 2390
 
@@ -177,7 +179,8 @@ void format_date( U days_since_2026, char* dt )
 void format_time( U t, char* tm ) // t - seconds since midnight, 0 to <86400
 {
   last_time_minutes = t/60%60; // save minutes for weather poll schedule
-  sprintf( tm, "%02u:%02u:%02u", t/3600, last_time_minutes, t%60 );
+  last_time_hours = t/3600; // for clock
+  sprintf( tm, "%02u:%02u:%02u", last_time_hours, last_time_minutes, t%60 );
   strcpy( last_time_string, tm ); // leave it there for other routines (currently - for log)
 }
 
@@ -195,6 +198,42 @@ void split_ntp_time( uint64_t ntp_time_ms, char* dt, char* tm, char* ms, char* w
   strcpy( wd, WEEKDAYS[(days + 4) % 7] );
 }
 
+void draw_clock()
+{
+  const U cx = 116; // center X (adjust for your screen)
+  const U cy = 53;  // center Y
+  const U r  = 10;  // radius
+
+  //oled.drawCircle(cx, cy, r); // Circle outline (diameter 15)
+  for( U i = 0; i < 12; ++i ) // 12 ticks
+  {
+    float angle = i * 30.0 * PI / 180.0; // every 30°
+    U x = (U)round( cx + r * sin(angle) );
+    U y = (U)round( cy - r * cos(angle) );
+    oled.setPixel(x,y);
+  }
+
+  // Convert hours/minutes to angles (radians) for hour/minute hands
+  float angle_h = ((last_time_hours % 12) + last_time_minutes / 60.0) * 30.0 * PI / 180.0;
+  float angle_m = last_time_minutes * 6.0 * PI / 180.0;
+
+  // Hand lengths
+  U len_h = r - 3;
+  U len_m = r - 1;
+
+  // Endpoints
+  U hx = (U)round( cx + len_h * sin(angle_h) );
+  U hy = (U)round( cy - len_h * cos(angle_h) );
+  U mx = (U)round( cx + len_m * sin(angle_m) );
+  U my = (U)round( cy - len_m * cos(angle_m) );
+
+  // Draw hands
+  oled.drawLine(cx,cy,hx,hy);  // hour
+  oled.drawLine(cx,cy,mx,my);  // minute
+
+  oled.display();
+}
+
 void display_date_time( char* dt, char* wd, char* tm, char* ms )
 {
   oled.clear();
@@ -208,7 +247,8 @@ void display_date_time( char* dt, char* wd, char* tm, char* ms )
   oled.drawString(98,24,ms); // was 72,23
   oled.drawString(0,48,temperature);
   oled.setFont(ArialMT_Plain_10);
-  oled.drawString(56,52,temperature_time);
+  oled.drawString(54,52,temperature_time);
+  draw_clock();
   oled.display();
 }
 
@@ -222,7 +262,7 @@ U get_and_show_date_time()
 {
   U ms_before = millis();
   U ntp_ms;
-  U nt-p_s = get_ntp_time( &ntp_ms ); // seconds since 1970.1.1 0:00:00 local time
+  U ntp_s = get_ntp_time( &ntp_ms ); // seconds since 1970.1.1 0:00:00 local time
   U ms_after = millis();
   if(ntp_s==0)
     return 0;
@@ -237,7 +277,7 @@ U get_and_show_date_time()
   return ms_after;
 }
 
-void just_show_time( U millis_ms )
+void just_show_time( U millis_ms ) // 6-7ms
 {
   char dt[20], tm[20], ms[20], wd[20];
   split_ntp_time(millis_ms + delta_ms,dt,tm,ms,wd);
@@ -256,7 +296,7 @@ void setup()
   oled.setTextAlignment(TEXT_ALIGN_LEFT);
 
   WiFi.begin(SSID,PASS);
-  while( WiFi.status() != WL_CONNECTED ) delay(500);
+  while( WiFi.status() != WL_CONNECTED ) delay(500); // TODO: reconnect on wifi break
 
   wificlient.setInsecure();
   wificlient.setTimeout(5000); // timeout 5 seconds
