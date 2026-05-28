@@ -12,9 +12,10 @@
 
 typedef unsigned long U;
 
-const U NTP_CHECK_INTERVAL = 150*60; // 2h30m
-const U NTP_CHECK_REPEAT = 30*60; // 30m
-const U NTP_CHECK_JITTER = 15*60; // 0..15m
+const U NTP_CHECK_INTERVAL = 90*60; // 1h30m
+const U NTP_CHECK_2ND_TIME = 10*60; // 10m (after initial time)
+const U NTP_CHECK_REPEAT = 30*60; // 30m (if failed)
+const U NTP_CHECK_JITTER = 10*60; // 0..10m (i.e. INTERVAL+(0..JITTER))
 const U WEATHER_POLL = 15; // 15m
 const U TIME_ZONE = +3; // Kyiv
 
@@ -240,11 +241,11 @@ void display_date_time( char* dt, char* wd, char* tm, char* ms )
   // oled.setColor(BLACK); oled.fillRect(0,19,70,17); oled.setColor(WHITE);
   oled.setFont(ArialMT_Plain_16);
   oled.drawString(0,0,dt);
-  oled.drawString(97,0,wd);
+  oled.drawString(96,0,wd);
   oled.setFont(ArialMT_Plain_24);
   oled.drawString(0,19,tm);
   oled.setFont(ArialMT_Plain_16);
-  oled.drawString(98,24,ms); // was 72,23
+  oled.drawString(97,24,ms);
   oled.drawString(0,48,temperature);
   oled.setFont(ArialMT_Plain_10);
   oled.drawString(54,52,temperature_time);
@@ -258,6 +259,13 @@ static uint64_t delta_ms = 0; // difference between millis() and last_ntp_time_m
 static U ntp_next_millis = 0; // to read NTP next time
 static U next_millis = 0; // to show time nex time
 
+void just_show_time( U millis_ms ) // 6-7ms
+{
+  char dt[20], tm[20], ms[20], wd[20];
+  split_ntp_time(millis_ms + delta_ms,dt,tm,ms,wd);
+  display_date_time(dt,wd,tm,ms);
+}
+
 U get_and_show_date_time()
 {
   U ms_before = millis();
@@ -268,20 +276,14 @@ U get_and_show_date_time()
     return 0;
   U one_way_trip_ms = (ms_after - ms_before + 1) / 2; // 1 - typical NTP delta_ms between receive and transmit
   last_ntp_time_ms = (uint64_t)ntp_s*1000 + ntp_ms + one_way_trip_ms; // corresponding to moment ms_after
+  uint64_t old_delta_ms = delta_ms; ///////////////////////////////////////////////// only for showing below
   delta_ms = last_ntp_time_ms - ms_after;
 
-  char dt[20], tm[20], ms[20], wd[20];
-  split_ntp_time(last_ntp_time_ms,dt,tm,ms,wd);
-  display_date_time(dt,wd,tm,ms);
-  Serial.printf("N %u.%03u %llu %llu %s %s.%s %s\n",ntp_s,ntp_ms,last_ntp_time_ms,delta_ms,dt,tm,ms,wd);
-  return ms_after;
-}
+  just_show_time( ms_after );
 
-void just_show_time( U millis_ms ) // 6-7ms
-{
-  char dt[20], tm[20], ms[20], wd[20];
-  split_ntp_time(millis_ms + delta_ms,dt,tm,ms,wd);
-  display_date_time(dt,wd,tm,ms);
+  Serial.printf("N %u.%03u %llu ∆ %llu → %llu %s\n",ntp_s,ntp_ms,last_ntp_time_ms,
+      old_delta_ms,delta_ms,last_time_string);
+  return ms_after;
 }
 
 void setup()
@@ -306,7 +308,7 @@ void setup()
   while( millis_ms==0 ) { delay(30000); millis_ms = get_and_show_date_time(); } // Don't start until we get time from NTP
   U fraction_ms = (U)( last_ntp_time_ms % 1000 );
   next_millis = millis_ms + (1000-fraction_ms) + 1000; // Shift to the whole second bound
-  ntp_next_millis = next_millis + NTP_CHECK_INTERVAL*1000;
+  ntp_next_millis = next_millis + NTP_CHECK_2ND_TIME*1000;
 
   get_and_show_temperature();
 }
@@ -332,8 +334,12 @@ void loop()
   }
   else if( m >= next_millis ) // don't show time when previous part worked - it's shown there
   {
+    U l_t_m = last_time_minutes; // for correction
     just_show_time(m);
     next_millis += 1000;
+    // correction for this specific board: +1ms every 2 minutes
+    if( last_time_minutes!=l_t_m && last_time_minutes%2==1 ) // new odd minute
+      ++delta_ms, ++next_millis;
   }
   delay(20);
 }
